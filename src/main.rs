@@ -4,12 +4,12 @@ extern crate time;
 use time::precise_time_ns;
 use std::ops::{Add, Sub, Mul};
 
-static NUM_BLOCKS: usize = 65535;
-static NUM_ENTITIES: usize = 1000;
-static CHUNK_COUNT: usize = 100;
+const BLOCKS_PER_CHUNK: usize = 65535;
+const ENTITIES_PER_CHUNK: usize = 1000;
+const BLOCK_COUNT: usize = 256;
+const CHUNK_COUNT: usize = 100;
 
 fn main() {
-    // TODO: Implement timing
     println!("Loading World...");
     let start = precise_time_ns();
     let mut game = Game::new();
@@ -19,8 +19,8 @@ fn main() {
 
     loop {
         let start = precise_time_ns();
-        let playerMovement = Vector::new(0.1, 0.0, 0.0);
-        game.player_location = game.player_location + playerMovement;
+        let player_movement = Vector::new(0.1, 0.0, 0.0);
+        game.player_location = game.player_location + player_movement;
         game.update_chunks();
         let end = precise_time_ns();
         println!("{} milliseconds", (end - start) as f64 * 0.000001);
@@ -31,50 +31,57 @@ fn main() {
 Game
 */
 struct Game {
-    chunks: Vec<Chunk>,
+    // Nothing actually uses the blocks right now, but don't warn
+    // With some unsafe, we could un-box these, but it's probably not worth it
+    #[allow(dead_code)]
+    blocks: Box<[Block]>,
+    chunks: Box<[Chunk]>,
     player_location: Vector,
-    chunk_counter: f32
+    chunk_counter: u32,
 }
 
 impl Game {
     fn new() -> Game {
-        let mut chunk_counter = 0.0f32;
-        let chunks = {
-            let mut chunks = Vec::with_capacity(CHUNK_COUNT);
-            for _ in 0..CHUNK_COUNT {
-                chunks.push(Chunk::new(Vector::new(chunk_counter, 0.0, 0.0)));
-                chunk_counter += 1.0;
-            }
-            chunks
-        };
+        let chunks = (0..CHUNK_COUNT)
+            .map(|i| Chunk::new(Vector::new(i as f32, 0.0, 0.0)))
+            .collect::<Vec<Chunk>>()
+            .into_boxed_slice();
+
+        let blocks = (0..BLOCK_COUNT)
+            .map(|i| {
+                Block {
+                    id: i as u8,
+                    name: format!("Block{}", i),
+                    location: Vector::new(i as f32, i as f32, i as f32),
+                    durability: 100,
+                    textureid: 1,
+                    block_type: 1,
+                    breakable: true,
+                    visible: true,
+                }
+            })
+            .collect::<Vec<Block>>()
+            .into_boxed_slice();
 
         Game {
+            blocks: blocks,
             chunks: chunks,
             player_location: Vector::new(0.0, 0.0, 0.0),
-            chunk_counter: chunk_counter
+            chunk_counter: CHUNK_COUNT as u32,
         }
     }
 
     fn update_chunks(&mut self) {
-        let mut amount_of_chunks_removed = 0;
         for chunk in self.chunks.iter_mut() {
-            chunk.process_entites();
-        }
-
-        let player_location = self.player_location.clone();
-
-        self.chunks.retain(| x | {
-            let chunkDistance = Vector::get_distance(x.location, player_location);
-            if chunkDistance > CHUNK_COUNT as f32 {
-                amount_of_chunks_removed += 1;
-                return false;
+            let chunk_distance = Vector::get_distance(chunk.location, self.player_location);
+            if chunk_distance > CHUNK_COUNT as f32 {
+                chunk.reset();
+                chunk.location.x = self.chunk_counter as f32;
+                self.chunk_counter += 1;
             }
-            true
-        });
-
-        for _ in 0..amount_of_chunks_removed {
-            self.chunks.push(Chunk::new(Vector::new(self.chunk_counter, 0.0, 0.0)));
-            self.chunk_counter += 1.0;
+            
+            // Don't process entities on chunks which we're going to reset anyway
+            chunk.process_entites();
         }
     }
 }
@@ -83,61 +90,21 @@ impl Game {
 Chunk
 */
 struct Chunk {
-    blocks: Vec<Block>,
+    block_ids: [u8; BLOCKS_PER_CHUNK],
+    // Should be a Vec, if it's possible to have less than ENTITIES_PER_CHUNK
     entities: Vec<Entity>,
     location: Vector
 }
 
 impl Chunk {
     fn new(location: Vector) -> Chunk {
-        let blocks = {
-            let mut blocks = Vec::with_capacity(NUM_BLOCKS);
-            for i in 0..NUM_BLOCKS {
-                let converted_i = i as f32;
-                let block = Block::new(
-                    Vector::new(converted_i, converted_i, converted_i),
-                    format!("Block: {}", i),
-                    100,
-                    1,
-                    true,
-                    true,
-                    1
-                );
-                blocks.push(block);
-            }
-            blocks
-        };
-
-        let entities = {
-            let mut entities = Vec::with_capacity(NUM_ENTITIES);
-            for i in 0..(NUM_ENTITIES / 4) {
-                let converted_i = i as f32;
-                entities.push(Entity::new(
-                    Vector::new(converted_i, converted_i, converted_i),
-                    EntityType::Chicken
-                ));
-                entities.push(Entity::new(
-                    Vector::new(converted_i + 2.0, converted_i, converted_i),
-                    EntityType::Chicken
-                ));
-                entities.push(Entity::new(
-                    Vector::new(converted_i + 3.0, converted_i, converted_i),
-                    EntityType::Chicken
-                ));
-                entities.push(Entity::new(
-                    Vector::new(converted_i + 4.0, converted_i, converted_i),
-                    EntityType::Chicken
-                ));
-            }
-            entities
-        };
-
-
-        Chunk {
+        let mut result = Chunk {
+            block_ids: [0; BLOCKS_PER_CHUNK],
+            entities: Vec::with_capacity(ENTITIES_PER_CHUNK),
             location: location,
-            blocks: blocks,
-            entities: entities
-        }
+        };
+        result.reset();
+        result
     }
 
     fn process_entites(&mut self) {
@@ -145,10 +112,38 @@ impl Chunk {
             entity.update_position();
         }
     }
+
+    fn reset(&mut self) {
+        for (i, block_id) in self.block_ids.iter_mut().enumerate() {
+            *block_id = (i % BLOCK_COUNT) as u8;
+        }
+        self.entities.clear();
+        for i in 0..(ENTITIES_PER_CHUNK / 4) {
+            let converted_i = i as f32;
+            self.entities.push(Entity::new(
+                Vector::new(converted_i, converted_i, converted_i),
+                EntityType::Chicken
+            ));
+            self.entities.push(Entity::new(
+                Vector::new(converted_i + 1.0, converted_i, converted_i),
+                EntityType::Zombie
+            ));
+            self.entities.push(Entity::new(
+                Vector::new(converted_i + 2.0, converted_i, converted_i),
+                EntityType::Exploder
+            ));
+            self.entities.push(Entity::new(
+                Vector::new(converted_i + 3.0, converted_i, converted_i),
+                EntityType::TallCreepyThing
+            ));
+        }
+    }
 }
+
 /*
 Entity
 */
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum EntityType {
     Zombie,
     Chicken,
@@ -156,6 +151,7 @@ enum EntityType {
     TallCreepyThing
 }
 
+#[derive(Debug, Clone)]
 struct Entity {
     location: Vector,
     name: String,
@@ -201,35 +197,16 @@ impl Entity {
 /*
 Block
 */
+#[derive(Debug, Clone, PartialEq)]
 struct Block {
-    location: Vector,
+    id: u8,
     name: String,
+    location: Vector,
     durability: i32,
     textureid: usize,
     breakable: bool,
     visible: bool,
     block_type: i32
-}
-
-impl Block {
-    //TODO Make new() more elegant
-    fn new(location: Vector,
-           name: String,
-           durability: i32,
-           textureid: usize,
-           breakable: bool,
-           visible: bool,
-           block_type: i32) -> Block {
-        Block {
-            location: location,
-            name: name,
-            durability: durability,
-            textureid: textureid,
-            breakable: breakable,
-            visible: visible,
-            block_type: block_type
-        }
-    }
 }
 
 /*
